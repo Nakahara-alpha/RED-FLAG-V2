@@ -1,0 +1,10 @@
+node_modules/
+session/
+db/*.db
+db/*.db-shm
+db/*.db-wal
+data/media/
+data/pins/
+data/backups/
+config.env
+*.log
