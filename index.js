@@ -20,6 +20,18 @@ import { remember, recall, makeCounterCache } from "./lib/msgstore.js";
 import { setRestarter } from "./lib/control.js";
 import { BOT_NAME, PREFIX } from "./lib/helpers.js";
 
+// Survive throws that originate DEEP INSIDE Baileys' own async event handlers
+// (e.g. the on-connect group sync in some fork builds throws
+// "groupFetchAllParticipating is not a function"). Those surface as unhandled
+// rejections and, under Node's default, would kill the whole process — but they
+// are almost always non-fatal to message handling, so log and keep running.
+process.on("unhandledRejection", (reason) => {
+    console.error("[RF] unhandledRejection (ignored):", reason?.stack || reason?.message || reason);
+});
+process.on("uncaughtException", (err) => {
+    console.error("[RF] uncaughtException (ignored):", err?.stack || err?.message || err);
+});
+
 // Init DB + scheduler up front — failures log, they never kill the process.
 try {
     getDb();
