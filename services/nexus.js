@@ -12,11 +12,13 @@
 import { wat, parseWhen, fmtDT, fetchBuffer, fetchJson } from '../lib/helpers.js';
 import { nextOccurrence } from '../commands/productivity.js';
 import { fetchHeadlines } from '../commands/news.js';
+import { airingBetween } from '../services/anime.js';
 import { agentRouterComplete, agentRouterReady, geminiComplete, geminiReady } from './ai-client.js';
 import {
   addReminder, addDeadline, addTimetable, addNote, addIdea, addTodo, addExpense,
   addBirthday, addReadLater, addTrackedAnime, addRecurring, addHabit,
   listDeadlines, listTodos, timetableForDay, listReminders, expensesSince,
+  listTrackedAnime,
   addNexusTurn, recentNexusTurns, trimNexusHistory,
   addNexusMemory, listNexusMemory,
 } from '../db/queries.js';
@@ -303,6 +305,23 @@ const TOOLS = [
         if (!j.extract) return { error: 'nothing found' };
         return { ok: true, data: { title: j.title, summary: j.extract, url: j.content_urls?.desktop?.page || '' } };
       } catch (e) { return { error: `lookup failed: ${e.message}` }; }
+    },
+  },
+  {
+    name: 'get_airing_anime',
+    description: "List anime airing TODAY, with titles the owner follows flagged. Use this for any 'what anime is releasing/airing today' question — the bot has this data, don't web-search for it.",
+    parameters: S({}, []),
+    run: async () => {
+      const now = wat();
+      const start = Math.floor(now.startOf('day').valueOf() / 1000);
+      const end = Math.floor(now.endOf('day').valueOf() / 1000);
+      const shows = await airingBetween(start, end);
+      const tracked = listTrackedAnime().map(t => t.title.toLowerCase());
+      const data = shows
+        .map(s => ({ title: s.title, score: s.score || null, following: tracked.some(t => s.title.toLowerCase().includes(t)) }))
+        .sort((a, b) => (b.following - a.following) || ((b.score || 0) - (a.score || 0)))
+        .slice(0, 30);
+      return data.length ? { ok: true, data } : { error: 'nothing airing today' };
     },
   },
   // placeholder-tools-marker
