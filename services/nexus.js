@@ -72,6 +72,19 @@ async function resolveParticipant(ctx, number) {
   } catch { /* fall through to a constructed jid */ }
   return `${want}@s.whatsapp.net`;
 }
+// Pick the member to act on: an explicit @mention or reply-target (WhatsApp gives
+// us their exact jid) always wins; otherwise match the number the model supplied
+// against the group roster. This is why "nexus kick @Someone" works.
+async function resolveTarget(ctx, number) {
+  const mentions = ctx?.mentions || [];
+  const want = String(number || '').replace(/\D/g, '');
+  if (want) {
+    const m = mentions.find(j => jidNum(j) === want || j.replace(/\D/g, '').startsWith(want));
+    if (m) return m;
+    return resolveParticipant(ctx, want);
+  }
+  return mentions.length ? mentions[0] : null;
+}
 
 // Each tool: run(args) → { ok, summary } on success or { error } on failure.
 const TOOLS = [
@@ -369,33 +382,33 @@ const TOOLS = [
   },
   {
     name: 'group_kick',
-    description: 'Remove a member from this group by phone number. Destructive — only on a clear instruction.',
-    parameters: S({ number: str('the member phone number (digits)') }, ['number']),
+    description: 'Remove a member from this group. If the owner @mentioned someone, you can leave number blank — the mention is used. Destructive: only on a clear instruction.',
+    parameters: S({ number: str('member phone number, or the number shown in their @mention; omit if already mentioned') }, []),
     run: async ({ number }, ctx) => {
       const bad = await requireGroupAdmin(ctx); if (bad) return { error: bad };
-      const jid = await resolveParticipant(ctx, number); if (!jid) return { error: 'who? give me their number' };
+      const jid = await resolveTarget(ctx, number); if (!jid) return { error: 'who? give me their number' };
       try { await ctx.sock.groupParticipantsUpdate(ctx.chatId, [jid], 'remove'); return { ok: true, summary: `removed ${jidNum(jid)}` }; }
       catch (e) { return { error: `couldn't remove them (they may be an admin): ${e.message}` }; }
     },
   },
   {
     name: 'group_promote',
-    description: 'Make a member a group admin, by phone number.',
-    parameters: S({ number: str('member phone number') }, ['number']),
+    description: 'Make a member a group admin. Omit number if the owner @mentioned them.',
+    parameters: S({ number: str('member phone number, or omit if @mentioned') }, []),
     run: async ({ number }, ctx) => {
       const bad = await requireGroupAdmin(ctx); if (bad) return { error: bad };
-      const jid = await resolveParticipant(ctx, number); if (!jid) return { error: 'give me their number' };
+      const jid = await resolveTarget(ctx, number); if (!jid) return { error: 'give me their number' };
       try { await ctx.sock.groupParticipantsUpdate(ctx.chatId, [jid], 'promote'); return { ok: true, summary: `promoted ${jidNum(jid)} to admin` }; }
       catch (e) { return { error: `couldn't promote: ${e.message}` }; }
     },
   },
   {
     name: 'group_demote',
-    description: 'Remove admin from a member, by phone number.',
-    parameters: S({ number: str('member phone number') }, ['number']),
+    description: 'Remove admin from a member. Omit number if the owner @mentioned them.',
+    parameters: S({ number: str('member phone number, or omit if @mentioned') }, []),
     run: async ({ number }, ctx) => {
       const bad = await requireGroupAdmin(ctx); if (bad) return { error: bad };
-      const jid = await resolveParticipant(ctx, number); if (!jid) return { error: 'give me their number' };
+      const jid = await resolveTarget(ctx, number); if (!jid) return { error: 'give me their number' };
       try { await ctx.sock.groupParticipantsUpdate(ctx.chatId, [jid], 'demote'); return { ok: true, summary: `demoted ${jidNum(jid)}` }; }
       catch (e) { return { error: `couldn't demote: ${e.message}` }; }
     },

@@ -3,7 +3,7 @@
 // through AgentRouter, and remembers context across messages. Owner-only.
 import { askNexus, nexusReady } from '../services/nexus.js';
 import { clearNexusHistory, listNexusMemory, deleteNexusMemory, clearNexusMemory } from '../db/queries.js';
-import { reply, PREFIX, getText } from '../lib/helpers.js';
+import { reply, PREFIX, getText, jidNum } from '../lib/helpers.js';
 
 async function handleNexus(sock, msg, args) {
   const sub = (args[0] || '').toLowerCase();
@@ -44,14 +44,18 @@ async function handleNexus(sock, msg, args) {
   }
   try {
     const chatId = msg.key.remoteJid;
+    const ctxInfo = msg.message?.extendedTextMessage?.contextInfo;
     // If the owner is REPLYING to a message, feed that message to NEXUS as context
     // so "nexus translate" / "nexus what does this mean" works on the quoted text.
-    const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+    // Mentions / reply-target: pass the EXACT jids so group actions (kick/promote)
+    // hit the right person — a mention is a @lid/number NEXUS can't resolve itself.
+    const quoted = ctxInfo?.quotedMessage;
     const quotedText = quoted ? (getText(quoted) || '').trim() : '';
-    const prompt = quotedText
-      ? `[The owner is replying to this message:\n"""\n${quotedText.slice(0, 2000)}\n"""]\n\n${text}`
-      : text;
-    const { text: answer } = await askNexus(prompt, { sock, chatId, isGroup: chatId.endsWith('@g.us') });
+    const mentions = [...new Set([...(ctxInfo?.mentionedJid || []), ...(ctxInfo?.participant ? [ctxInfo.participant] : [])])];
+    let prompt = text;
+    if (quotedText) prompt = `[The owner is replying to this message:\n"""\n${quotedText.slice(0, 2000)}\n"""]\n\n${prompt}`;
+    if (mentions.length) prompt = `[Members @mentioned in this message: ${mentions.map(jidNum).join(', ')}]\n${prompt}`;
+    const { text: answer } = await askNexus(prompt, { sock, chatId, isGroup: chatId.endsWith('@g.us'), mentions });
     return reply(sock, msg, `⚡ ${answer}`);
   } catch (err) {
     console.error('[RF] nexus failed:', err);
