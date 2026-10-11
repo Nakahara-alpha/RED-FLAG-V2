@@ -61,10 +61,13 @@ function gitUpdate() {
   if (!fs.existsSync(path.join(ROOT, '.git'))) { log('not a git checkout — skipping update.'); return false; }
   if (capture('git', ['--version']) === null) { log('git not available — skipping update.'); return false; }
   const before = capture('git', ['rev-parse', 'HEAD']);
-  log('checking for updates…');
-  // --ff-only so a messy history never clobbers anything; untracked files
-  // (config.env, session/, db/) are always left alone by pull.
-  if (!run('git', ['pull', '--ff-only'])) { log('git pull failed (continuing with current code).'); return false; }
+  log('syncing with GitHub…');
+  // Force-match the remote. `reset --hard` only touches TRACKED files — config.env,
+  // session/ and db/ are gitignored, so they're never affected. This also
+  // self-heals a dirty working tree (e.g. a locally-modified package.json) that
+  // would otherwise abort a plain `git pull`.
+  if (!run('git', ['fetch', 'origin', BRANCH])) { log('git fetch failed (continuing with current code).'); return false; }
+  if (!run('git', ['reset', '--hard', `origin/${BRANCH}`])) { log('git reset failed (continuing with current code).'); return false; }
   const after = capture('git', ['rev-parse', 'HEAD']);
   const changed = before && after && before !== after;
   log(changed ? `updated ${before.slice(0, 7)} → ${after.slice(0, 7)}.` : 'already up to date.');
