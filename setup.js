@@ -98,6 +98,34 @@ function ensureConfig() {
   }
 }
 
+// ── 3b. patch a known bug in the Baileys fork ────────────────────────────────
+// The fork (@innovatorssoft/baileys 7.4.3) calls groupFetchAllParticipating()
+// inside chats.js's `CB:ib,,dirty` (groups) handler, but that function lives in
+// the groups layer which chats can't see → it's undefined → the handler throws
+// on an INBOUND frame, so messages the user sends are never delivered. Upstream
+// Baileys doesn't fetch groups from chats at all. We guard the call so the
+// handler finishes (and cleanDirtyBits runs, clearing the server's dirty flag).
+// Idempotent; re-applied every boot so it survives npm reinstalls.
+function patchBaileys() {
+  const f = path.join(ROOT, 'node_modules', '@innovatorssoft', 'baileys', 'lib', 'Socket', 'chats.js');
+  try {
+    if (!fs.existsSync(f)) return;
+    const s = fs.readFileSync(f, 'utf8');
+    const patched = s.replace(
+      /^(\s*)await groupFetchAllParticipating\(\)\s*$/m,
+      "$1if (typeof groupFetchAllParticipating === 'function') { await groupFetchAllParticipating(); }",
+    );
+    if (patched !== s) {
+      fs.writeFileSync(f, patched);
+      log('patched Baileys chats.js (groupFetchAllParticipating guard — fixes message reception).');
+    } else {
+      log('Baileys patch not needed (already guarded or upstream build).');
+    }
+  } catch (e) {
+    log(`Baileys patch skipped: ${e.message}`);
+  }
+}
+
 // ── 4. launch ────────────────────────────────────────────────────────────────
 async function main() {
   log(`starting in ${ROOT}`);
@@ -105,6 +133,7 @@ async function main() {
   let codeChanged = false;
   try { codeChanged = gitUpdate(); } catch (e) { log(`update step error (continuing): ${e.message}`); }
   ensureDeps(codeChanged);
+  patchBaileys();
   ensureConfig();
   log('launching the bot…');
   await import('./index.js'); // runs in-process so panel Stop/Restart signals reach it
