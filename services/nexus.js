@@ -9,16 +9,17 @@
 // read-later, anime, recurring/habits) plus its own memory. It cannot delete
 // data, send messages to other chats, moderate groups, or run system/PC
 // commands — do those with the explicit commands.
-import { wat, parseWhen, fmtDT, fetchBuffer, fetchJson, groupMeta, botIsAdmin, jidNum, mentionTag } from '../lib/helpers.js';
+import { wat, parseWhen, fmtDT, fetchBuffer, fetchJson, groupMeta, botIsAdmin, jidNum, mentionTag, PREFIX } from '../lib/helpers.js';
 import { nextOccurrence } from '../commands/productivity.js';
 import { fetchHeadlines } from '../commands/news.js';
+import { searchCommands } from '../commands/menu.js';
 import { airingBetween } from '../services/anime.js';
 import { agentRouterComplete, agentRouterReady, geminiComplete, geminiReady } from './ai-client.js';
 import {
   addReminder, addDeadline, addTimetable, addNote, addIdea, addTodo, addExpense,
   addBirthday, addReadLater, addTrackedAnime, addRecurring, addHabit,
   listDeadlines, listTodos, timetableForDay, listReminders, expensesSince,
-  listTrackedAnime, activeSince, statsTrackingSince, ownerLastActivity, ownerActivityByChat,
+  listTrackedAnime, activeSince, statsTrackingSince, ownerLastActivity, ownerActivityByChat, oldestCachedMsg,
   addNexusTurn, recentNexusTurns, trimNexusHistory,
   addNexusMemory, listNexusMemory,
 } from '../db/queries.js';
@@ -485,6 +486,34 @@ const TOOLS = [
         last_message_preview: String(last.content || '').slice(0, 80) || '(no text)',
         caveat: 'Only what I observed while running/linked — not WhatsApp\'s own last-seen.',
       } };
+    },
+  },
+  {
+    name: 'get_commands',
+    description: "Look up the bot's manual slash-commands (the ones the owner types with the prefix, like .menu, .backfill, .antidelete). Use when he asks 'what's the command for X', 'how do I Y', or 'what can the bot do'. Optional keyword filters the list. These are commands HE runs — distinct from the actions you perform via your own tools.",
+    parameters: S({ query: str('optional keyword to filter commands') }, []),
+    run: ({ query }) => {
+      const rows = searchCommands(query || '');
+      if (!rows.length) return { error: `no command matches "${query}"` };
+      const p = PREFIX();
+      return { ok: true, data: rows.slice(0, 40).map(c => ({ command: `${p}${c.name}`, usage: `${p}${c.usage}`, what: c.desc })) };
+    },
+  },
+  {
+    name: 'backfill_messages',
+    description: "Pull older messages from BEFORE the bot started into this chat, so you can then summarise or reference them. DMs only — WhatsApp will not serve group history. Optional count (default 50, max 200). Results arrive in the background; tell him to give it a few seconds.",
+    parameters: S({ count: { type: 'number', description: 'how many older messages, default 50' } }, []),
+    run: async ({ count }, ctx) => {
+      if (!ctx?.sock || !ctx?.chatId) return { error: 'no chat context' };
+      if (ctx.isGroup) return { error: "WhatsApp doesn't serve group history to linked devices — backfill only works in DMs" };
+      if (typeof ctx.sock.fetchMessageHistory !== 'function') return { error: 'history API not available on this build' };
+      const seed = oldestCachedMsg(ctx.chatId);
+      if (!seed) return { error: 'nothing cached in this chat yet to reach back from — let a message arrive first' };
+      const n = Math.min(Math.max(Number(count) || 50, 1), 200);
+      try {
+        await ctx.sock.fetchMessageHistory(n, { remoteJid: ctx.chatId, id: seed.msg_id, fromMe: !!seed.from_me }, Math.floor(seed.ts / 1000));
+      } catch (e) { return { error: `WhatsApp refused the request: ${e.message}` }; }
+      return { ok: true, summary: `requested ${n} older messages — they stream in over the next few seconds` };
     },
   },
   // placeholder-tools-marker

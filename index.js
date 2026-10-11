@@ -194,18 +194,22 @@ const startBot = async () => {
             console.log(`[RF] ${BOT_NAME()} connected to WhatsApp`);
             if (!hasSentHello) {
                 hasSentHello = true;
-                try {
-                    const me = thisSock.user.id.split(":")[0] + "@s.whatsapp.net";
-                    const p = PREFIX();
-                    await thisSock.sendMessage(me, {
+                // Delay the self-greeting. Right after connect the companion<->phone
+                // Signal session isn't warm yet, so an INSTANT self-chat message lands
+                // as "Waiting for this message" on the phone. A few seconds fixes it.
+                const me = thisSock.user.id.split(":")[0] + "@s.whatsapp.net";
+                const p = PREFIX();
+                setTimeout(() => {
+                    if (!isCurrent()) return;
+                    thisSock.sendMessage(me, {
                         text:
                             `🚩 *${BOT_NAME()}* is online.\n\n` +
                             `⌨️ Prefix: *${p}*\n` +
                             `📖 *${p}menu* — all commands\n` +
                             `💡 *${p}help <command>* — usage + example\n` +
                             `🏓 *${p}ping* — check I'm alive`,
-                    });
-                } catch { /* non-fatal */ }
+                    }).catch(() => { /* non-fatal */ });
+                }, 8000);
             }
         } else if (connection === "close") {
             const loggedOut =

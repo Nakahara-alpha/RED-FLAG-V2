@@ -152,6 +152,25 @@ for (const [, , items] of SECTIONS) {
   }
 }
 
+// Expose the command catalogue so NEXUS can look up / explain real commands
+// instead of guessing. Dedupe (HELP holds aliases too), optional keyword filter.
+export function searchCommands(query = '') {
+  const seen = new Set();
+  const all = [];
+  for (const e of HELP.values()) {
+    if (seen.has(e.name)) continue;
+    seen.add(e.name);
+    all.push(e);
+  }
+  const s = String(query).trim().toLowerCase();
+  if (!s) return all;
+  return all.filter(e =>
+    e.name.includes(s) ||
+    (e.aliases || []).some(a => a.includes(s)) ||
+    (e.desc || '').toLowerCase().includes(s) ||
+    (e.usage || '').toLowerCase().includes(s));
+}
+
 function buildMenuText() {
   const p = PREFIX();
   const lines = [`╭━━〔 🚩 *𝐵𝑌 𝑅𝛯𝐷 𝐹𝐿𝛥𝐺 V2* 〕━━╮`, `┃ up ${fmtDuration(process.uptime() * 1000)} · prefix *${p}*`];

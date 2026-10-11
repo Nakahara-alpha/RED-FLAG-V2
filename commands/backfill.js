@@ -14,8 +14,11 @@ import { oldestCachedMsg, countCachedMsgs } from '../db/queries.js';
 import { reply, PREFIX, fmtDT } from '../lib/helpers.js';
 import { historyEnabled } from '../services/history.js';
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function handleBackfill(sock, msg, args) {
   const chatId = msg.key.remoteJid;
+  const isGroup = chatId.endsWith('@g.us');
 
   if (!historyEnabled()) {
     return reply(sock, msg, `🕰️ History sync is off. Remove *HISTORY_SYNC=0* from config.env and restart.`);
@@ -42,14 +45,36 @@ async function handleBackfill(sock, msg, args) {
     return reply(sock, msg, `🕰️ WhatsApp refused the history request: ${e.message.slice(0, 120)}`);
   }
 
-  const isGroup = chatId.endsWith('@g.us');
-  return reply(sock, msg,
-    `🕰️ Asked WhatsApp for *${count}* messages before ${fmtDT(seed.ts)}.\n` +
-    `📥 They stream in in the background — run *${PREFIX()}backfill status* in a few seconds.\n` +
-    `_Currently cached here: ${before} messages._` +
-    (isGroup
-      ? '\n\n⚠️ Heads up: WhatsApp does *not* serve group history to linked devices, so this usually returns nothing in groups. It works for DMs.'
-      : ''));
+  await reply(sock, msg,
+    `🕰️ *Backfill started* — asked for ${count} messages before ${fmtDT(seed.ts)}.\n` +
+    `📥 Cached here now: *${before}*. Pulling… I'll report when they land.` +
+    (isGroup ? '\n\n⚠️ Groups usually return nothing — WhatsApp only serves DM history.' : ''));
+
+  // Messages stream in asynchronously (services/history.js persists them). Poll the
+  // cache count until it stops growing, so we can report real progress + completion.
+  let last = before, stable = 0, announced = before;
+  for (let i = 0; i < 12; i++) {           // ~24s ceiling
+    await sleep(2000);
+    const n = countCachedMsgs(chatId);
+    if (n > last) { last = n; stable = 0; } else { stable++; }
+    // One mid-run nudge once a decent batch has landed, so he sees it's working.
+    if (last - announced >= 20) {
+      announced = last;
+      await reply(sock, msg, `⏳ Still pulling… *${last - before}* in so far (total ${last}).`);
+    }
+    if (stable >= 2) break;                // no growth for ~4s → done
+  }
+
+  const gained = last - before;
+  const oldest = oldestCachedMsg(chatId);
+  if (gained > 0) {
+    return reply(sock, msg,
+      `✅ *Backfill done.* Pulled *${gained}* older message(s).\n` +
+      `📦 This chat now has *${last}* cached, back to *${oldest ? fmtDT(oldest.ts) : '—'}*.`);
+  }
+  return reply(sock, msg, isGroup
+    ? '📭 Nothing came back — WhatsApp doesn\'t serve group history to linked devices. (DMs only.)'
+    : '📭 Nothing came back. Either you\'ve reached the start of what WhatsApp will hand over, or your phone was offline. Try again in a bit.');
 }
 
 async function handleStatus(sock, msg) {
