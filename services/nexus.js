@@ -12,7 +12,7 @@
 import { wat, parseWhen, fmtDT, fetchBuffer, fetchJson } from '../lib/helpers.js';
 import { nextOccurrence } from '../commands/productivity.js';
 import { fetchHeadlines } from '../commands/news.js';
-import { agentRouterComplete, agentRouterReady } from './ai-client.js';
+import { agentRouterComplete, agentRouterReady, geminiComplete, geminiReady } from './ai-client.js';
 import {
   addReminder, addDeadline, addTimetable, addNote, addIdea, addTodo, addExpense,
   addBirthday, addReadLater, addTrackedAnime, addRecurring, addHabit,
@@ -345,7 +345,7 @@ function buildSystemPrompt() {
   ].join('\n\n');
 }
 
-export function nexusReady() { return agentRouterReady(); }
+export function nexusReady() { return geminiReady() || agentRouterReady(); }
 
 // Load recent history but keep it CHEAP: cap to the last few turns AND a rough
 // character budget so a long conversation doesn't balloon every request's token
@@ -365,46 +365,119 @@ function loadHistory() {
   return out;
 }
 
-/**
- * One NEXUS turn: feeds history + the new message to AgentRouter with tools,
- * runs the tool-call loop, persists the exchange, and returns the final text
- * plus a list of actions taken.
- */
-export async function askNexus(userText) {
-  if (!agentRouterReady()) {
-    throw new Error('🧠 NEXUS needs AGENTROUTER_API_KEY in config.env (key from agentrouter.org/console/token).');
-  }
-  const messages = [{ role: 'system', content: buildSystemPrompt() }, ...loadHistory(), { role: 'user', content: userText }];
-  addNexusTurn('user', userText);
+// Shared tool executor — runs a tool by name, records a summary action.
+async function callTool(name, args, actions) {
+  const tool = TOOLS.find(t => t.name === name);
+  let result;
+  try { result = tool ? await tool.run(args || {}) : { error: `unknown tool ${name}` }; }
+  catch (e) { result = { error: `tool error: ${e.message}` }; }
+  if (result?.ok && result.summary) actions.push(result.summary);
+  return result;
+}
 
+// AgentRouter (OpenAI-style `tools`) agent loop.
+async function runAgentRouterAgent(system, history, userText) {
+  const messages = [{ role: 'system', content: system }, ...history, { role: 'user', content: userText }];
   const actions = [];
   let final = '';
   for (let i = 0; i < 6; i++) {
     const msg = await agentRouterComplete(messages, { tools: OPENAI_TOOLS });
-    // Normalize for the next request (content must be a string, keep tool_calls).
     messages.push({ role: 'assistant', content: msg.content || '', tool_calls: msg.tool_calls });
     if (msg.tool_calls?.length) {
       for (const call of msg.tool_calls) {
-        const tool = TOOLS.find(t => t.name === call.function?.name);
-        let result;
-        try {
-          const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
-          result = tool ? await tool.run(args) : { error: `unknown tool ${call.function?.name}` };
-        } catch (e) {
-          result = { error: `tool error: ${e.message}` };
-        }
-        if (result?.ok && result.summary) actions.push(result.summary);
+        const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
+        const result = await callTool(call.function?.name, args, actions);
         messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, 2000) });
       }
-      continue; // let the model react to the tool results
+      continue;
     }
     final = (msg.content || '').trim();
     break;
   }
   if (!final) final = actions.length ? `✅ Done:\n• ${actions.join('\n• ')}` : '🤔 I didn\'t get a response — try rephrasing.';
-  addNexusTurn('assistant', final);
-  trimNexusHistory(200);
   return { text: final, actions };
+}
+
+// Convert our JSON-schema tool params to Gemini's Schema shape (UPPERCASE types;
+// no-arg tools get no `parameters` so Gemini accepts them).
+function toGeminiSchema(s) {
+  if (!s || typeof s !== 'object') return undefined;
+  const out = {};
+  if (s.type) out.type = String(s.type).toUpperCase();
+  if (s.description) out.description = s.description;
+  if (s.enum) out.enum = s.enum;
+  if (s.items) out.items = toGeminiSchema(s.items);
+  if (s.properties) {
+    out.properties = {};
+    for (const [k, v] of Object.entries(s.properties)) out.properties[k] = toGeminiSchema(v);
+  }
+  if (s.required?.length) out.required = s.required;
+  return out;
+}
+const GEMINI_TOOL_DECLS = [{
+  functionDeclarations: TOOLS.map(t => {
+    const decl = { name: t.name, description: t.description };
+    const p = toGeminiSchema(t.parameters);
+    if (p?.properties && Object.keys(p.properties).length) decl.parameters = p;
+    return decl;
+  }),
+}];
+
+// Gemini native function-calling agent loop.
+async function runGeminiAgent(system, history, userText) {
+  const contents = [
+    ...history.map(h => ({ role: h.role === 'assistant' ? 'model' : 'user', parts: [{ text: h.content }] })),
+    { role: 'user', parts: [{ text: userText }] },
+  ];
+  const actions = [];
+  let final = '';
+  for (let i = 0; i < 6; i++) {
+    const content = await geminiComplete(contents, { tools: GEMINI_TOOL_DECLS, systemInstruction: system });
+    contents.push(content);
+    const calls = (content.parts || []).filter(p => p.functionCall).map(p => p.functionCall);
+    if (calls.length) {
+      const parts = [];
+      for (const call of calls) {
+        const result = await callTool(call.name, call.args, actions);
+        parts.push({ functionResponse: { name: call.name, response: (result && typeof result === 'object') ? result : { result } } });
+      }
+      contents.push({ role: 'function', parts });
+      continue;
+    }
+    final = (content.parts || []).map(p => p.text || '').join('').trim();
+    break;
+  }
+  if (!final) final = actions.length ? `✅ Done:\n• ${actions.join('\n• ')}` : '🤔 I didn\'t get a response — try rephrasing.';
+  return { text: final, actions };
+}
+
+// %%ASKNEXUS%%
+/**
+ * One NEXUS turn. Gemini (native function-calling) first, AgentRouter as backup.
+ * Persists the exchange and returns { text, actions }.
+ */
+export async function askNexus(userText) {
+  if (!nexusReady()) {
+    throw new Error('🧠 NEXUS needs a GEMINI_API_KEY (or AGENTROUTER_API_KEY) in config.env.');
+  }
+  const system = buildSystemPrompt();
+  const history = loadHistory();
+  addNexusTurn('user', userText);
+
+  let result = null;
+  if (geminiReady()) {
+    try { result = await runGeminiAgent(system, history, userText); }
+    catch (e) { console.error('[RF] NEXUS Gemini failed → AgentRouter:', e.message); }
+  }
+  if (!result && agentRouterReady()) {
+    try { result = await runAgentRouterAgent(system, history, userText); }
+    catch (e) { console.error('[RF] NEXUS AgentRouter failed:', e.message); }
+  }
+  if (!result) result = { text: '🧠 All AI providers failed just now — check your keys/model and try again.', actions: [] };
+
+  addNexusTurn('assistant', result.text);
+  trimNexusHistory(200);
+  return result;
 }
 
 

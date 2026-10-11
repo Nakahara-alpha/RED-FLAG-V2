@@ -220,8 +220,8 @@ const startBot = async () => {
         }
         for (const msg of messages) {
             if (!msg?.message) continue;
-            if (process.env.RF_DEBUG !== "0") {
-                console.log(`[RF][dbg] upsert type=${type} fromMe=${!!msg.key?.fromMe} chat=${msg.key?.remoteJid}`);
+            if (process.env.RF_DEBUG !== "0" && msg.key?.fromMe) {
+                console.log(`[RF][dbg] upsert type=${type} fromMe=true chat=${msg.key?.remoteJid}`);
             }
             // Self-bot: the owner's own commands are fromMe (some builds deliver
             // them as 'append', not 'notify'). Process every 'notify' message plus

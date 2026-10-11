@@ -149,6 +149,44 @@ async function geminiGenerate(parts, { model = GEMINI_MODEL } = {}) {
   throw lastErr || new Error('gemini: all keys failed');
 }
 
+export function geminiReady() { return geminiKeys().length > 0; }
+
+/**
+ * Raw Gemini generateContent that supports function-calling and returns the
+ * model's `content` object ({ role, parts }) — parts may contain `functionCall`.
+ * Used by the NEXUS agent loop. Multi-key with rotation, like geminiGenerate.
+ * `tools` is Gemini's shape: [{ functionDeclarations: [...] }].
+ */
+export async function geminiComplete(contents, { tools, systemInstruction, model = GEMINI_MODEL } = {}) {
+  const keys = geminiKeys();
+  if (!keys.length) throw new AiUnavailableError('no gemini key');
+  const body = { contents };
+  if (tools) body.tools = tools;
+  if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
+  let lastErr;
+  for (let n = 0; n < keys.length; n++) {
+    const key = keys[(_gemIdx + n) % keys.length];
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+        },
+      );
+      if (!res.ok) { lastErr = new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 180)}`); continue; }
+      const j = await res.json();
+      const content = j.candidates?.[0]?.content;
+      if (!content) { lastErr = new Error('gemini: no content'); continue; }
+      _gemIdx = (_gemIdx + n + 1) % keys.length;
+      return content;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('gemini: all keys failed');
+}
+
 const NO_KEYS_MSG =
   '🤖 No AI key configured. Add GEMINI_API_KEY (aistudio.google.com — supports several comma-separated), AGENTROUTER_API_KEY (agentrouter.org) or GROQ_API_KEY (console.groq.com) to config.env and restart.';
 
@@ -171,7 +209,7 @@ async function runChain(label, providers, failMsg) {
   throw new Error(failMsg);
 }
 
-/** General text prompt. Gemini (multi-key) → AgentRouter → Groq. */
+/** General text prompt. Gemini (multi-key) → AgentRouter. (Groq is transcription-only.) */
 export async function aiChat(prompt, system = null) {
   const messages = [];
   if (system) messages.push({ role: 'system', content: system });
@@ -180,11 +218,10 @@ export async function aiChat(prompt, system = null) {
   return runChain('aiChat', [
     () => geminiGenerate(geminiParts),
     () => agentRouterChat(messages),
-    () => groqChat(messages),
   ], '🤖 AI request failed — the provider may be down or rate-limited. Try again shortly.');
 }
 
-/** OCR / describe an image. Gemini vision → AgentRouter vision → Groq Llama-4. */
+/** OCR / describe an image. Gemini vision → AgentRouter vision. */
 export async function aiVision(buffer, mimeType, prompt) {
   const b64 = buffer.toString('base64');
   const openAiVisionMsg = [{
@@ -197,7 +234,6 @@ export async function aiVision(buffer, mimeType, prompt) {
   return runChain('aiVision', [
     () => geminiGenerate([{ text: prompt }, { inline_data: { mime_type: mimeType, data: b64 } }]),
     () => agentRouterChat(openAiVisionMsg, { model: AGENTROUTER_VISION_MODEL }),
-    () => groqChat(openAiVisionMsg, { model: GROQ_VISION_MODEL }),
   ], '🤖 Vision request failed. Try again shortly.');
 }
 
