@@ -17,7 +17,11 @@ import { cacheMsg } from '../db/queries.js';
 import { contentTypeOf, getText } from '../lib/helpers.js';
 
 export function historyEnabled() {
-  return process.env.HISTORY_SYNC !== '0';
+  // OPT-IN. Enabling WhatsApp history sync flips the socket's syncFullHistory /
+  // shouldSyncHistoryMessage on, and that has been implicated in outgoing messages
+  // decaying into permanent "Waiting for this message" on a linked-device bot. So
+  // this stays OFF unless the owner explicitly sets HISTORY_SYNC=1 to try backfill.
+  return process.env.HISTORY_SYNC === '1';
 }
 
 // A history message's sender: in groups it's the participant, in DMs the chat jid
