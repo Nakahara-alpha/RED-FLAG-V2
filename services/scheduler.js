@@ -23,7 +23,12 @@ import { fmtDT, fmtDuration, fetchJson, dmOwner, PREFIX } from '../lib/helpers.j
 const TICK_MS = 20 * 1000;
 // Ephemeral media retention (HARDEN #4): default 15 min, override MEDIA_RETENTION_MIN
 const MEDIA_RETENTION_MS = (parseInt(process.env.MEDIA_RETENTION_MIN, 10) || 15) * 60 * 1000;
-const TEXT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // powers !export / !summarize / edit originals
+// Cached message TEXT retention — powers !export / !summarize / .backfill history /
+// NEXUS chat context / edit originals. Text rows are tiny (a few hundred bytes), so
+// the default is generous; lower TEXT_RETENTION_DAYS if DB size ever matters.
+// NOTE: this purge runs every tick, so it MUST outlast backfilled history or
+// .backfill would silently lose everything it fetched.
+const TEXT_RETENTION_MS = (parseInt(process.env.TEXT_RETENTION_DAYS, 10) || 30) * 24 * 60 * 60 * 1000;
 // Storage cap (HARDEN #4): default 500 MB, override MEDIA_CAP_MB
 const MEDIA_CAP_BYTES = (parseInt(process.env.MEDIA_CAP_MB, 10) || 500) * 1024 * 1024;
 const MISSED_NOTE_MS = 10 * 60 * 1000;   // one-shots later than this get a "(missed)" note

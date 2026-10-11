@@ -140,6 +140,14 @@ export function setCachedContent(msgId, content) {
 export function recentMsgs(chatId, n) {
   return getDb().prepare('SELECT * FROM msg_cache WHERE chat_id=? ORDER BY ts DESC LIMIT ?').all(chatId, n).reverse();
 }
+// Oldest cached message in a chat — the seed `.backfill` needs: WhatsApp's
+// on-demand history request asks for messages BEFORE a key/timestamp we already hold.
+export function oldestCachedMsg(chatId) {
+  return getDb().prepare('SELECT * FROM msg_cache WHERE chat_id=? ORDER BY ts ASC LIMIT 1').get(chatId);
+}
+export function countCachedMsgs(chatId) {
+  return getDb().prepare('SELECT COUNT(*) AS n FROM msg_cache WHERE chat_id=?').get(chatId)?.n || 0;
+}
 export function expiredMedia(cutoffTs) {
   return getDb().prepare('SELECT msg_id, media_path FROM msg_cache WHERE media_path IS NOT NULL AND ts < ?').all(cutoffTs);
 }

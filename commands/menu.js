@@ -64,6 +64,7 @@ const SECTIONS = [
     ['ai', 'ai <prompt>', 'Ask the AI anything', 'ai explain OSI layers briefly', ['ask', 'gpt']],
     ['aimodel', 'aimodel · list · <id> · reset', 'View/switch the AgentRouter model', 'aimodel list', ['model', 'setmodel']],
     ['summarize', 'summarize <n>', 'Summarize last n msgs in this chat', 'summarize 100', ['sum']],
+    ['backfill', 'backfill <count> · status', 'Pull older WhatsApp messages into the cache (DMs only)', 'backfill 100', ['history']],
     ['tldr', 'tldr (reply to link/PDF/text)', 'Summarize a link, PDF or text', 'reply → tldr'],
     ['tr', 'tr <lang> <text> (or reply)', 'Translate (auto-detect source)', 'tr yoruba how are you', ['translate']],
     ['draft', 'draft <what to write>', 'Draft a message to copy-send', 'draft extension request to lecturer'],

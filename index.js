@@ -18,6 +18,7 @@ import { setSock as setSchedulerSock, startScheduler } from "./services/schedule
 import { initSessionFromGist } from "./lib/session.js";
 import { remember, recall, makeCounterCache } from "./lib/msgstore.js";
 import { setRestarter } from "./lib/control.js";
+import { attachHistorySync, historyEnabled } from "./services/history.js";
 import { BOT_NAME, PREFIX } from "./lib/helpers.js";
 
 // Survive throws that originate DEEP INSIDE Baileys' own async event handlers
@@ -108,8 +109,13 @@ const startBot = async () => {
             logger: logger.child({ level: "fatal" }),
             browser: ["Ubuntu", "Chrome", "20.04"], // stable signature for pairing-code login
             generateHighQualityLinkPreview: true,
-            syncFullHistory: false,
-            shouldSyncHistoryMessage: () => false,
+            // Message backfill (HISTORY_SYNC=0 to disable). Baileys throws away every
+            // history payload — including on-demand .backfill results — unless
+            // shouldSyncHistoryMessage returns true, so these must agree.
+            // syncFullHistory only has an effect at PAIRING time (the flag rides in
+            // the registration node), so an existing session backfills via .backfill.
+            syncFullHistory: historyEnabled(),
+            shouldSyncHistoryMessage: () => historyEnabled(),
             printQRInTerminal: false,
             markOnlineOnConnect: process.env.ALWAYS_ONLINE === "true",
             // Count retry receipts so Baileys re-establishes a FRESH session and
@@ -150,6 +156,9 @@ const startBot = async () => {
     // Epoch-guarded like every other listener: a superseded socket must not
     // persist its (possibly stale) creds over the current generation's.
     thisSock.ev.on("creds.update", () => { if (isCurrent()) saveCreds(); });
+
+    // Backfill WhatsApp's own message history into msg_cache (see services/history.js).
+    attachHistorySync(thisSock);
 
     // Pairing-code login: no QR scan — enter the code in
     // WhatsApp > Linked devices > Link with phone number instead.
