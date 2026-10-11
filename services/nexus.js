@@ -18,7 +18,7 @@ import {
   addReminder, addDeadline, addTimetable, addNote, addIdea, addTodo, addExpense,
   addBirthday, addReadLater, addTrackedAnime, addRecurring, addHabit,
   listDeadlines, listTodos, timetableForDay, listReminders, expensesSince,
-  listTrackedAnime, activeSince, statsTrackingSince,
+  listTrackedAnime, activeSince, statsTrackingSince, ownerLastActivity, ownerActivityByChat,
   addNexusTurn, recentNexusTurns, trimNexusHistory,
   addNexusMemory, listNexusMemory,
 } from '../db/queries.js';
@@ -459,6 +459,32 @@ const TOOLS = [
           note: 'Absence from this list means no activity since tracking_since, NOT that they never messaged.',
         },
       };
+    },
+  },
+  {
+    name: 'get_my_activity',
+    description: "When the OWNER was last active on WhatsApp, as the bot saw it. Use for 'when did I last do something', 'when was I last active/online', 'which chats was I last in'. scope='last' = his most recent activity; scope='by_chat' = last activity per chat. These are times the bot observed (since it was running/linked), not WhatsApp's native last-seen.",
+    parameters: S({ scope: { type: 'string', enum: ['last', 'by_chat'] } }, []),
+    run: async ({ scope }, ctx) => {
+      const label = async (id) => {
+        if (!id.endsWith('@g.us')) return `chat with ${jidNum(id)}`;
+        try { return `group "${(await groupMeta(ctx.sock, id)).subject}"`; } catch { return 'a group'; }
+      };
+      if (scope === 'by_chat') {
+        const rows = ownerActivityByChat(10);
+        if (!rows.length) return { ok: true, data: { note: "I haven't seen you send anything yet." } };
+        const data = [];
+        for (const r of rows) data.push({ where: await label(r.chat_id), last_active: fmtDT(r.last_ts), your_messages: r.n });
+        return { ok: true, data };
+      }
+      const [last] = ownerLastActivity(1);
+      if (!last) return { ok: true, data: { note: "I haven't seen you send anything yet." } };
+      return { ok: true, data: {
+        last_active: fmtDT(last.ts),
+        where: await label(last.chat_id),
+        last_message_preview: String(last.content || '').slice(0, 80) || '(no text)',
+        caveat: 'Only what I observed while running/linked — not WhatsApp\'s own last-seen.',
+      } };
     },
   },
   // placeholder-tools-marker

@@ -148,6 +148,15 @@ export function oldestCachedMsg(chatId) {
 export function countCachedMsgs(chatId) {
   return getDb().prepare('SELECT COUNT(*) AS n FROM msg_cache WHERE chat_id=?').get(chatId)?.n || 0;
 }
+// The owner's OWN recent activity (messages the bot saw them send), newest first.
+export function ownerLastActivity(limit = 1) {
+  return getDb().prepare('SELECT chat_id, content, ts FROM msg_cache WHERE from_me=1 ORDER BY ts DESC LIMIT ?').all(limit);
+}
+// Per-chat: when the owner was last active in each chat (their own messages).
+export function ownerActivityByChat(limit = 10) {
+  return getDb().prepare(`SELECT chat_id, MAX(ts) AS last_ts, COUNT(*) AS n
+    FROM msg_cache WHERE from_me=1 GROUP BY chat_id ORDER BY last_ts DESC LIMIT ?`).all(limit);
+}
 export function expiredMedia(cutoffTs) {
   return getDb().prepare('SELECT msg_id, media_path FROM msg_cache WHERE media_path IS NOT NULL AND ts < ?').all(cutoffTs);
 }
