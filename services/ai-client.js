@@ -103,7 +103,7 @@ export function agentRouterReady() { return !!agentRouterKey(); }
  * NEXUS agent loop drives. Returns the assistant message object as-is
  * ({ role, content, tool_calls? }). Throws AiUnavailableError if no key.
  */
-export async function agentRouterComplete(messages, { tools, toolChoice = 'auto', maxTokens = 1024, model = currentModel() } = {}) {
+export async function agentRouterComplete(messages, { tools, toolChoice = 'auto', maxTokens = 1024, model = currentModel(), timeoutMs = AI_TIMEOUT_MS } = {}) {
   const key = agentRouterKey();
   if (!key) throw new AiUnavailableError('no agentrouter key');
   const body = { model, messages, max_tokens: maxTokens };
@@ -112,7 +112,7 @@ export async function agentRouterComplete(messages, { tools, toolChoice = 'auto'
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'User-Agent': 'red-flag-bot/2.0' },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`agentrouter ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const j = await res.json();
@@ -121,30 +121,73 @@ export async function agentRouterComplete(messages, { tools, toolChoice = 'auto'
   return choice.message;
 }
 
+// Keep Gemini FAST: minimise "thinking" on models that support it. Gemini 3.x
+// uses thinkingLevel ("low"/"high"). Set GEMINI_THINKING=high to let it deliberate,
+// or =off to omit the field. If a model rejects it the request auto-retries
+// without it, so a wrong value never takes AI down — it just runs normally.
+function thinkingConfig() {
+  const v = (process.env.GEMINI_THINKING || 'low').trim().toLowerCase();
+  if (!v || v === 'off' || v === 'none') return null;
+  return { thinkingLevel: v === 'high' ? 'high' : 'low' };
+}
+
+const GEMINI_URL = (model) =>
+  `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+
+// One POST. Throws on HTTP error, tagging .status/.body so callers can decide
+// whether to retry (e.g. drop thinkingConfig) or move to the next key.
+async function geminiFetch(model, key, body, timeoutMs) {
+  const res = await fetch(GEMINI_URL(model), {
+    method: 'POST',
+    // Key in a header, not the query string — URLs leak into proxy/access logs.
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    const text = (await res.text()).slice(0, 200);
+    const err = new Error(`gemini ${res.status}: ${text}`);
+    err.status = res.status; err.body = text;
+    throw err;
+  }
+  return res.json();
+}
+
 async function geminiGenerate(parts, { model = GEMINI_MODEL } = {}) {
+  const content = await geminiRequest({ contents: [{ role: 'user', parts }] }, { model });
+  const text = (content.parts || []).map(p => p.text || '').join('').trim();
+  if (!text) throw new Error('gemini: empty response');
+  return text;
+}
+
+// Multi-key, thinking-minimised request. Returns the model's `content` object
+// ({ role, parts }). Rotates keys on failure; on a thinking rejection retries
+// the same key once WITHOUT the field. Shared by every Gemini call below.
+async function geminiRequest(base, { model = GEMINI_MODEL, timeoutMs = AI_TIMEOUT_MS } = {}) {
   const keys = geminiKeys();
   if (!keys.length) throw new AiUnavailableError('no gemini key');
+  const tc = thinkingConfig();
+  const variants = tc
+    ? [{ ...base, generationConfig: { ...(base.generationConfig || {}), thinkingConfig: tc } }, base]
+    : [base];
   let lastErr;
   for (let n = 0; n < keys.length; n++) {
     const key = keys[(_gemIdx + n) % keys.length];
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-        {
-          method: 'POST',
-          // Key in a header, not the query string — URLs leak into proxy/access logs.
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-          body: JSON.stringify({ contents: [{ role: 'user', parts }] }),
-          signal: AbortSignal.timeout(AI_TIMEOUT_MS),
-        },
-      );
-      if (!res.ok) { lastErr = new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 160)}`); continue; }
-      const j = await res.json();
-      const text = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('').trim();
-      if (!text) { lastErr = new Error('gemini: empty response'); continue; }
-      _gemIdx = (_gemIdx + n + 1) % keys.length; // rotate so load spreads across keys
-      return text;
-    } catch (e) { lastErr = e; }
+    for (let v = 0; v < variants.length; v++) {
+      try {
+        const j = await geminiFetch(model, key, variants[v], timeoutMs);
+        const content = j.candidates?.[0]?.content;
+        if (!content) { lastErr = new Error('gemini: no content'); break; }
+        _gemIdx = (_gemIdx + n + 1) % keys.length;
+        return content;
+      } catch (e) {
+        lastErr = e;
+        const thinkingRejected = v === 0 && variants.length > 1 && e.status === 400 &&
+          /think|generationConfig|Unknown name|Invalid JSON/i.test(e.body || e.message || '');
+        if (thinkingRejected) continue;   // same key, no thinkingConfig
+        break;                            // other error → next key
+      }
+    }
   }
   throw lastErr || new Error('gemini: all keys failed');
 }
@@ -157,34 +200,11 @@ export function geminiReady() { return geminiKeys().length > 0; }
  * Used by the NEXUS agent loop. Multi-key with rotation, like geminiGenerate.
  * `tools` is Gemini's shape: [{ functionDeclarations: [...] }].
  */
-export async function geminiComplete(contents, { tools, systemInstruction, model = GEMINI_MODEL } = {}) {
-  const keys = geminiKeys();
-  if (!keys.length) throw new AiUnavailableError('no gemini key');
-  const body = { contents };
-  if (tools) body.tools = tools;
-  if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
-  let lastErr;
-  for (let n = 0; n < keys.length; n++) {
-    const key = keys[(_gemIdx + n) % keys.length];
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(AI_TIMEOUT_MS),
-        },
-      );
-      if (!res.ok) { lastErr = new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 180)}`); continue; }
-      const j = await res.json();
-      const content = j.candidates?.[0]?.content;
-      if (!content) { lastErr = new Error('gemini: no content'); continue; }
-      _gemIdx = (_gemIdx + n + 1) % keys.length;
-      return content;
-    } catch (e) { lastErr = e; }
-  }
-  throw lastErr || new Error('gemini: all keys failed');
+export async function geminiComplete(contents, { tools, systemInstruction, model = GEMINI_MODEL, timeoutMs = AI_TIMEOUT_MS } = {}) {
+  const base = { contents };
+  if (tools) base.tools = tools;
+  if (systemInstruction) base.systemInstruction = { parts: [{ text: systemInstruction }] };
+  return geminiRequest(base, { model, timeoutMs });
 }
 
 const NO_KEYS_MSG =

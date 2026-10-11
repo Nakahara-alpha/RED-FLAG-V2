@@ -100,22 +100,25 @@ export async function fetchAiringShows(now = wat()) {
 
 const AIRING_TOP = 15; // cap the "top picks" list so !airing isn't a 100-line wall
 
-async function handleAiring(sock, msg) {
+async function handleAiring(sock, msg, args) {
+  const showAll = ['all', 'full', 'more'].includes((args[0] || '').toLowerCase());
   try {
     const now = wat();
     const shows = await fetchAiringShows(now);
     if (!shows.length) return reply(sock, msg, '📺 Nothing airing today (or AniList is napping).');
 
     const followed = shows.filter(s => s.isTracked);
-    const rest = shows.filter(s => !s.isTracked).slice(0, AIRING_TOP);
+    const rest = shows.filter(s => !s.isTracked).slice(0, showAll ? Infinity : AIRING_TOP);
     const fmt = s => `• *${s.title}*${s.score ? `  ★${s.score}` : ''}`;
 
     const parts = [`📺 *Airing — ${now.format('ddd DD MMM')}*  ·  ${shows.length} shows`];
     if (followed.length) parts.push('', `⭐ *Following*`, followed.map(fmt).join('\n'));
-    if (rest.length) parts.push('', `🔥 *Top picks*`, rest.map(fmt).join('\n'));
+    if (rest.length) parts.push('', showAll ? `🔥 *All shows*` : `🔥 *Top picks*`, rest.map(fmt).join('\n'));
     const shownRest = followed.length + rest.length;
     const more = shows.length - shownRest;
-    parts.push('', `_${more > 0 ? `+${more} more airing today · ` : ''}${PREFIX()}track add <title> to follow_`);
+    parts.push('', more > 0
+      ? `_+${more} more · *${PREFIX()}airing all* to see every show_`
+      : `_${PREFIX()}track add <title> to follow_`);
 
     return reply(sock, msg, parts.join('\n'));
   } catch {

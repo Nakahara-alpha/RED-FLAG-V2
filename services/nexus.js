@@ -24,6 +24,13 @@ import {
 const DOW = { monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 7 };
 const isoToday = () => (wat().day() === 0 ? 7 : wat().day());
 
+// Tool-calling rounds (model reasons, calls a tool, reasons again) legitimately
+// take longer than a one-shot chat — especially on a "thinking" model like
+// gemini-3.8-flash. Give each agent step a roomier deadline than the default
+// AI_TIMEOUT_MS so a working request isn't aborted mid-thought. Override with
+// NEXUS_TIMEOUT_MS in config.env.
+const NEXUS_TIMEOUT_MS = parseInt(process.env.NEXUS_TIMEOUT_MS, 10) || 60000;
+
 function normHM(s) {
   const m = String(s || '').match(/^(\d{1,2}):(\d{2})$/);
   if (!m) return null;
@@ -381,7 +388,7 @@ async function runAgentRouterAgent(system, history, userText) {
   const actions = [];
   let final = '';
   for (let i = 0; i < 6; i++) {
-    const msg = await agentRouterComplete(messages, { tools: OPENAI_TOOLS });
+    const msg = await agentRouterComplete(messages, { tools: OPENAI_TOOLS, timeoutMs: NEXUS_TIMEOUT_MS });
     messages.push({ role: 'assistant', content: msg.content || '', tool_calls: msg.tool_calls });
     if (msg.tool_calls?.length) {
       for (const call of msg.tool_calls) {
@@ -432,7 +439,7 @@ async function runGeminiAgent(system, history, userText) {
   const actions = [];
   let final = '';
   for (let i = 0; i < 6; i++) {
-    const content = await geminiComplete(contents, { tools: GEMINI_TOOL_DECLS, systemInstruction: system });
+    const content = await geminiComplete(contents, { tools: GEMINI_TOOL_DECLS, systemInstruction: system, timeoutMs: NEXUS_TIMEOUT_MS });
     contents.push(content);
     const calls = (content.parts || []).filter(p => p.functionCall).map(p => p.functionCall);
     if (calls.length) {
