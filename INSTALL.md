@@ -18,35 +18,59 @@ differ slightly — I've said what to look for.
 
 ## 1. Create the server
 In the OptikLink dashboard, create a server using a **Node.js / bot egg**. In its
-**Startup** tab (or Docker image dropdown) pick **Node 20 or newer**. Start it once
-so the container/files exist, then **Stop** it while you set things up.
+**Startup** tab (or Docker image dropdown) pick a Node version — **Node 20 or 22
+(LTS) is safest** for the native modules (better-sqlite3, sharp). Very new odd
+versions (e.g. Node 25) sometimes lack prebuilt binaries and fail to install.
+
+> This egg's startup is a fixed template that ends with `node /home/container/${BOT_JS_FILE}`
+> and already runs `npm install` for you on boot (and `git pull` when `AUTO_UPDATE=1`).
+> So you don't type a startup command — you set **variables** (below).
 
 ## 2. Get the code onto the server — pick ONE
 
-**Option A — from GitHub (easiest updates):**
-Put this project in a GitHub repo, then on the panel set the egg's **Git Repository
-Address** to your repo URL (and branch `main`). Reinstall/boot pulls it in.
+**Option A — from GitHub (recommended; enables one-click updates):**
+Your repo is up: **`https://github.com/Nakahara-alpha/RED-FLAG-V2`** (public).
+The egg clones it **during Reinstall**, and only into an *empty* folder — so:
+
+1. **File Manager** → `/home/container` → if anything is there (a stray
+   `package.json`, a default `index.js`, etc.), **select all → Delete**. The clone
+   is skipped if the folder isn't empty, which is the #1 cause of
+   *"Cannot find module index.js"*.
+2. **Startup** tab → set these variables (names vary by egg — match by meaning):
+
+   | Variable | Value |
+   |---|---|
+   | **Git Address** (`GIT_ADDRESS`) | `https://github.com/Nakahara-alpha/RED-FLAG-V2` |
+   | **Install Branch** (`BRANCH`) | `main` |
+   | **User Uploaded Files** (`USER_UPLOAD`) | `0` (clone from Git) |
+   | **Auto Update** (`AUTO_UPDATE`) | `1` |
+   | **Bot JS File** (`BOT_JS_FILE`) | `setup.js` (or `index.js`) |
+
+3. **Settings** tab → **Reinstall**. Watch the **Console**: you should see
+   **`Cloning into …`** and **a lot** of packages install (hundreds — not 26). If
+   you only see ~26 packages and no "Cloning", the folder wasn't empty — redo step 1.
+
+> **Private repo?** Make it public (nothing secret is committed), or give the egg a
+> GitHub token (`GIT_USER` + `GIT_ACCESS_TOKEN`, or embed it in the URL).
 
 **Option B — upload a zip (no Git):**
-Zip this folder, open the server's **File Manager**, upload the zip into
-`/home/container`, then **Decompress/Unarchive** it (the ⋮ menu next to the file).
-Make sure `index.js` and `package.json` sit directly in `/home/container`, not in a
-sub-folder.
+Zip this folder, **File Manager** → upload into `/home/container` → **Decompress**
+(the ⋮ menu). Ensure `index.js` + `package.json` sit directly in `/home/container`,
+not in a sub-folder. Set **`BOT_JS_FILE`** = `index.js`. (Zip uploads have no
+`.git`, so no auto-update — re-upload to update.)
 
-> Do **not** upload `node_modules/` — the panel installs fresh (§3). Also skip
-> `session/`, `db/*.db`, and `config.env` (secrets); `.gitignore` already excludes them.
+> Never upload `node_modules/`, `session/`, `db/*.db`, or `config.env`.
 
-## 3. Make sure dependencies install
-The bot needs `npm install` to run on the container. Most Node eggs do this
-automatically on install, or have an **"Additional Node packages" / "Auto npm
-install"** option — leave it on. If yours doesn't, set the **Startup command** to:
-```
-npm install && npm start
-```
-(better-sqlite3 and sharp build native code — the first install takes a minute).
+## 3. Dependencies — automatic
+This egg runs `npm install` itself every boot (you saw it in the console), so
+there's nothing to do here. `setup.js` also double-checks and only reinstalls when
+the code actually changed. (better-sqlite3 + sharp build native code — the first
+install takes a minute.)
 
 ## 4. Create your `config.env` (in the File Manager)
-This is the reliable way on a panel. In the server's **File Manager**:
+Do this **after** the repo is cloned (§2) — `config.env` isn't in Git, so a fresh
+clone won't have it, and `setup.js` will create a blank one you then fill. In the
+server's **File Manager**:
 1. **New File** → name it `config.env`.
 2. Open `config.env.example` (it's in the repo), copy everything, paste into `config.env`.
 3. Fill in the essentials and **Save**:
@@ -60,13 +84,16 @@ This is the reliable way on a panel. In the server's **File Manager**:
 > variables there instead — they override `config.env`. The File Manager method
 > works on every egg, so start there.
 
-## 5. Set the startup command
-In **Startup**, make sure the command runs the bot:
+## 5. Point the egg at the bootstrapper
+This egg has no free-form "startup command" — it runs `node /home/container/${BOT_JS_FILE}`.
+So just set the **`BOT_JS_FILE`** variable (Startup tab):
 ```
-npm start
+BOT_JS_FILE = setup.js
 ```
-(or `npm install && npm start` from §3). If the egg asks for a **"Main/Bot JS
-file"**, set it to `index.js`.
+`setup.js` makes sure `config.env` exists, installs only when the code changed,
+pulls updates, then launches the bot. Prefer to keep it bare? Set `BOT_JS_FILE = index.js`
+instead — the egg still installs deps and (with `AUTO_UPDATE=1`) pulls updates;
+you'd just create `config.env` yourself (§4).
 
 ## 6. Start it & link WhatsApp
 1. Press **Start** and open the **Console** tab.
@@ -102,20 +129,26 @@ Message **yourself** on WhatsApp:
   occasionally as an extra copy.
 
 ## 10. Updating
-- **Option A (GitHub):** if the egg has an **Auto-Update / git pull** toggle, turn
-  it on — it pulls on each boot. Otherwise, re-pull from the panel or re-run the
-  install. `session/` + `db/` are untouched; the schema auto-migrates.
-- **Option B (zip):** upload the changed files via File Manager and **Restart**.
-  (Don't overwrite `config.env`, `session/`, or `db/`.)
+- **If your startup command is `node setup.js`:** just **Restart** — it pulls the
+  latest commit from GitHub and reinstalls deps only if they changed. Nothing else
+  to do. (Set `AUTO_UPDATE=0` in config.env/variables to pause auto-pull.)
+- **Manual:** re-pull from the panel (or re-run install) if you use `npm start`.
+Either way, `config.env`, `session/`, and `db/redflag.db` are left untouched — no
+re-pairing, no data loss; the schema auto-migrates on boot.
 
 ## 11. Troubleshooting (on the panel)
+- **`Cannot find module '/home/container/index.js'`** + only ~26 packages installed
+  → the repo never cloned; the egg installed a stray/empty `package.json` instead.
+  Fix: File Manager → **empty** `/home/container`, set `GIT_ADDRESS` + `USER_UPLOAD=0`
+  (§2), then **Reinstall**. A good clone shows `Cloning into …` and installs hundreds
+  of packages.
 - **No pairing code in Console** → confirm `PAIRING_NUMBER` is set and the server
-  actually started (check for `npm install` finishing first).
-- **`Cannot find module …`** → dependencies didn't install; set startup to
-  `npm install && npm start` (§3) and Restart.
-- **Old Node / native build errors** (better-sqlite3, sharp) → bump the egg to
-  **Node 20+** in Startup/Docker image, then Reinstall-free Restart; if it must
-  rebuild, back up `db/` + `session/` first.
+  actually started (wait for `npm install` to finish first).
+- **Native build errors** (better-sqlite3, sharp) on install → switch the egg to
+  **Node 20 or 22 (LTS)** and Reinstall; brand-new Node builds sometimes lack
+  prebuilt binaries.
+- **`Cannot find module` for a dependency** → deps didn't install; Reinstall, or
+  set `BOT_JS_FILE=setup.js` (it force-installs when needed).
 - **"Waiting for this message" in your DMs** → send `.reset`; if it sticks,
   `.relink confirm`. Only run **one** server per number — two corrupt encryption.
 - **AI "down/rate-limited"** → add more Gemini keys, or `.aimodel list` then
