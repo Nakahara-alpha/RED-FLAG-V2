@@ -448,7 +448,9 @@ async function runGeminiAgent(system, history, userText) {
         const result = await callTool(call.name, call.args, actions);
         parts.push({ functionResponse: { name: call.name, response: (result && typeof result === 'object') ? result : { result } } });
       }
-      contents.push({ role: 'function', parts });
+      // Gemini 3 dropped the old `function` role — tool results go back as
+      // `user` (the valid roles are SYSTEM/USER/MODEL/…; `function`/`tool` 400).
+      contents.push({ role: 'user', parts });
       continue;
     }
     final = (content.parts || []).map(p => p.text || '').join('').trim();
