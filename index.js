@@ -30,6 +30,7 @@ try {
 
 let sock;
 let hasSentHello = false;
+let onlineSince = 0; // ms timestamp of the last successful connect (to skip replayed history)
 // Each socket generation gets a unique epoch. Any event from a socket whose
 // epoch is no longer current is IGNORED — this is what prevents a dying old
 // socket from touching Signal state / killing the new socket (the root cause
@@ -168,6 +169,7 @@ const startBot = async () => {
         }
         if (connection === "open") {
             setSchedulerSock(thisSock);
+            onlineSince = Date.now();
             console.log(`[RF] ${BOT_NAME()} connected to WhatsApp`);
             if (!hasSentHello) {
                 hasSentHello = true;
@@ -204,9 +206,16 @@ const startBot = async () => {
         for (const msg of messages) {
             if (msg?.message) remember(msg.key, msg.message);
         }
-        if (type !== "notify") return;
+        if (type !== "notify" && type !== "append") return;
         for (const msg of messages) {
             if (!msg?.message) continue;
+            // This is a self-bot: the owner's own commands are fromMe. Some Baileys
+            // builds deliver your own sends as 'append', not 'notify' — so process
+            // all 'notify' messages PLUS fromMe messages, while skipping history
+            // replayed on connect (anything timestamped before we came online).
+            const tsMs = Number(msg.messageTimestamp?.toNumber?.() ?? msg.messageTimestamp ?? 0) * 1000;
+            const live = type === "notify" || (msg.key?.fromMe && tsMs >= onlineSince - 60000);
+            if (!live) continue;
             try {
                 await handleUpsert(thisSock, msg);
             } catch (err) {

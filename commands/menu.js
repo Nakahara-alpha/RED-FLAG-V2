@@ -129,6 +129,7 @@ const SECTIONS = [
     ['prefix', 'prefix <symbol>', 'Change the command prefix (persists)', 'prefix !'],
     ['reset', 'reset', 'Bounce the connection (fixes stuck "waiting" DMs)', 'reset', ['restart']],
     ['relink', 'relink confirm', 'Wipe session + re-pair (code in server console)', 'relink confirm'],
+    ['update', 'update', 'Pull the latest code from GitHub & restart', 'update', ['upgrade']],
     ['status', 'status', 'Uptime, RAM, disk (flags >85%)', 'status', ['health']],
     ['backup', 'backup', 'DB backup to your DM (auto-nightly, keeps 7)', 'backup'],
     ['led', 'led on/off', 'ESP32 LED over MQTT', 'led on'],

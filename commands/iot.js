@@ -2,6 +2,7 @@
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { espPublish, espRequest } from '../services/mqtt-bridge.js';
@@ -12,6 +13,7 @@ import { reply, PREFIX, fmtDuration, ownerJid } from '../lib/helpers.js';
 
 const execAsync = promisify(exec);
 const isWin = process.platform === 'win32';
+const PROJECT_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // MQTT/ESP errors from the bridge are prefixed with 📡 and are user-helpful
 // (e.g. "MQTT_URL not set"). Pass those through; log + genericize anything else
@@ -216,10 +218,43 @@ async function handleRelink(sock, msg, args) {
   setTimeout(() => requestRestart(true).catch(e => console.error('[RF] relink failed:', e.message)), 1500);
 }
 
+// ── self-update ──────────────────────────────────────────────────────────────
+// .update → git pull the latest code, npm install if it changed, then exit so
+// the host (OptikLink/pm2/etc.) relaunches on the new code. Needs a git checkout.
+async function handleUpdate(sock, msg) {
+  if (!fs.existsSync(path.join(PROJECT_ROOT, '.git'))) {
+    return reply(sock, msg, '🔄 I\'m not a git checkout, so I can\'t self-update. Deploy me from GitHub (clone) to enable this.');
+  }
+  await reply(sock, msg, '🔄 Checking for updates…');
+  const opts = { cwd: PROJECT_ROOT, timeout: 60000, maxBuffer: 10 * 1024 * 1024 };
+  try {
+    const before = (await execAsync('git rev-parse --short HEAD', opts)).stdout.trim();
+    await execAsync('git pull --ff-only', opts);
+    const after = (await execAsync('git rev-parse --short HEAD', opts)).stdout.trim();
+    if (before === after) return reply(sock, msg, `✅ Already up to date (\`${after}\`).`);
+
+    let log = '';
+    try { log = (await execAsync(`git log --oneline ${before}..${after}`, opts)).stdout.trim(); } catch { /* non-fatal */ }
+    await reply(sock, msg, '📦 New code pulled — installing dependencies…');
+    await execAsync('npm install --no-audit --no-fund', { ...opts, timeout: 300000 });
+
+    await reply(sock, msg,
+      `⬆️ *Updated* \`${before}\` → \`${after}\`\n${log ? log.slice(0, 800) + '\n\n' : ''}` +
+      '♻️ Restarting to apply… I\'ll be back in ~20s. (If I don\'t return, hit *Start* on the panel.)');
+    setTimeout(() => process.exit(0), 1500); // host relaunches → new code loads
+  } catch (err) {
+    console.error('[RF] update failed:', err.message);
+    return reply(sock, msg,
+      `🔄 Update failed: ${String(err.message).slice(0, 200)}\n` +
+      '_(local changes to tracked files can block a pull — I only pull cleanly.)_');
+  }
+}
+
 export const commands = [
   { name: 'prefix', execute: handlePrefix },
   { name: 'reset', aliases: ['restart'], execute: handleReset },
   { name: 'relink', execute: handleRelink },
+  { name: 'update', aliases: ['upgrade'], execute: handleUpdate },
   { name: 'led', execute: handleLed },
   { name: 'room', execute: handleRoom },
   { name: 'esp', execute: handleEsp },
