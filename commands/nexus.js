@@ -2,8 +2,42 @@
 // your data (reminders, deadlines, timetable, notes, expenses, …) via tool-calls
 // through AgentRouter, and remembers context across messages. Owner-only.
 import { askNexus, nexusReady } from '../services/nexus.js';
-import { clearNexusHistory, listNexusMemory, deleteNexusMemory, clearNexusMemory } from '../db/queries.js';
-import { reply, PREFIX, getText, jidNum } from '../lib/helpers.js';
+import { clearNexusHistory, listNexusMemory, deleteNexusMemory, clearNexusMemory, recentMsgs } from '../db/queries.js';
+import { reply, PREFIX, getText, jidNum, groupMeta } from '../lib/helpers.js';
+
+// WhatsApp renders "@2348012345678" as a real tag ONLY if the payload also carries
+// that person's jid in `mentions`. NEXUS writes plain @<number> in its text, so map
+// every @number in the reply back to a real jid (mention list first, then the group
+// roster — which covers the @lid vs @s.whatsapp.net split).
+async function resolveMentions(sock, chatId, text, known = []) {
+  const nums = [...new Set((String(text).match(/@(\d{5,})/g) || []).map(s => s.slice(1)))];
+  if (!nums.length) return [];
+  const pool = [...known];
+  if (chatId.endsWith('@g.us')) {
+    try {
+      const meta = await groupMeta(sock, chatId);
+      for (const p of meta.participants) for (const j of [p.id, p.jid, p.lid]) if (j) pool.push(j);
+    } catch { /* roster unavailable — fall back to what the message gave us */ }
+  }
+  return [...new Set(nums.map(n => pool.find(j => jidNum(j) === n) || `${n}@s.whatsapp.net`))];
+}
+
+// Last few messages in this chat, so NEXUS knows what's being talked about and can
+// map a display name ("Moyin") to the number it must tag. Bounded to stay cheap.
+function chatContext(chatId, limit = 15, charBudget = 1500) {
+  const rows = recentMsgs(chatId, limit).filter(r => r.content);
+  if (!rows.length) return '';
+  const lines = [];
+  let budget = charBudget;
+  for (let i = rows.length - 1; i >= 0; i--) {           // newest-first, keep what fits
+    const r = rows[i];
+    const who = r.from_me ? 'Owner' : `${r.push_name || 'Unknown'} (${jidNum(r.sender)})`;
+    const line = `${who}: ${String(r.content).slice(0, 200)}`;
+    if ((budget -= line.length) < 0) break;
+    lines.unshift(line);
+  }
+  return lines.length ? `[Recent messages in this chat, oldest first:\n${lines.join('\n')}\n]` : '';
+}
 
 async function handleNexus(sock, msg, args) {
   const sub = (args[0] || '').toLowerCase();
@@ -55,8 +89,11 @@ async function handleNexus(sock, msg, args) {
     let prompt = text;
     if (quotedText) prompt = `[The owner is replying to this message:\n"""\n${quotedText.slice(0, 2000)}\n"""]\n\n${prompt}`;
     if (mentions.length) prompt = `[Members @mentioned in this message: ${mentions.map(jidNum).join(', ')}]\n${prompt}`;
+    const convo = chatContext(chatId);
+    if (convo) prompt = `${convo}\n\n${prompt}`;
     const { text: answer } = await askNexus(prompt, { sock, chatId, isGroup: chatId.endsWith('@g.us'), mentions });
-    return reply(sock, msg, `⚡ ${answer}`);
+    const out = `⚡ ${answer}`;
+    return reply(sock, msg, { text: out, mentions: await resolveMentions(sock, chatId, out, mentions) });
   } catch (err) {
     console.error('[RF] nexus failed:', err);
     return reply(sock, msg, err.message?.startsWith('⚡')
