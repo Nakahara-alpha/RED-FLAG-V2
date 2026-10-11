@@ -9,7 +9,7 @@
 // read-later, anime, recurring/habits) plus its own memory. It cannot delete
 // data, send messages to other chats, moderate groups, or run system/PC
 // commands — do those with the explicit commands.
-import { wat, parseWhen, fmtDT, fetchBuffer, fetchJson } from '../lib/helpers.js';
+import { wat, parseWhen, fmtDT, fetchBuffer, fetchJson, groupMeta, botIsAdmin, jidNum, mentionTag } from '../lib/helpers.js';
 import { nextOccurrence } from '../commands/productivity.js';
 import { fetchHeadlines } from '../commands/news.js';
 import { airingBetween } from '../services/anime.js';
@@ -52,6 +52,26 @@ function parseClock(s) {
 
 const str = (desc) => ({ type: 'string', description: desc });
 const S = (props, required) => ({ type: 'object', properties: props, required: required || [] });
+
+// Group-admin helpers, shared by the group_* tools. ctx = { sock, chatId, isGroup }.
+// Returns an error string if the action can't run (not a group / bot not admin), else null.
+async function requireGroupAdmin(ctx) {
+  if (!ctx?.isGroup) return 'that only works inside a group';
+  if (!(await botIsAdmin(ctx.sock, ctx.chatId))) return 'I need to be a group admin here first';
+  return null;
+}
+// Match a bare phone number back to the group's real participant jid (handles the
+// @lid vs @s.whatsapp.net split by comparing digits), falling back to a plain jid.
+async function resolveParticipant(ctx, number) {
+  const want = String(number || '').replace(/\D/g, '');
+  if (!want) return null;
+  try {
+    const meta = await groupMeta(ctx.sock, ctx.chatId);
+    const hit = meta.participants.find(p => jidNum(p.id) === want || p.id.replace(/\D/g, '').startsWith(want));
+    if (hit) return hit.id;
+  } catch { /* fall through to a constructed jid */ }
+  return `${want}@s.whatsapp.net`;
+}
 
 // Each tool: run(args) → { ok, summary } on success or { error } on failure.
 const TOOLS = [
@@ -324,6 +344,88 @@ const TOOLS = [
       return data.length ? { ok: true, data } : { error: 'nothing airing today' };
     },
   },
+  {
+    name: 'group_members',
+    description: "List this group's members (phone number + whether each is an admin). Call this first when you need to find who to kick/promote by name or number.",
+    parameters: S({}, []),
+    run: async (_args, ctx) => {
+      if (!ctx?.isGroup) return { error: 'that only works inside a group' };
+      const meta = await groupMeta(ctx.sock, ctx.chatId);
+      return { ok: true, data: meta.participants.map(p => ({ number: jidNum(p.id), admin: !!p.admin })) };
+    },
+  },
+  {
+    name: 'group_tag_all',
+    description: 'Tag/mention every member of this group with an optional announcement.',
+    parameters: S({ message: str('optional text to send above the mentions') }, []),
+    run: async ({ message }, ctx) => {
+      if (!ctx?.isGroup) return { error: 'that only works inside a group' };
+      const meta = await groupMeta(ctx.sock, ctx.chatId);
+      const jids = meta.participants.map(p => p.id);
+      const text = (message || '').trim() || '📢 Attention everyone!';
+      await ctx.sock.sendMessage(ctx.chatId, { text: `${text}\n\n${jids.map(mentionTag).join(' ')}`, mentions: jids });
+      return { ok: true, summary: `tagged ${jids.length} members` };
+    },
+  },
+  {
+    name: 'group_kick',
+    description: 'Remove a member from this group by phone number. Destructive — only on a clear instruction.',
+    parameters: S({ number: str('the member phone number (digits)') }, ['number']),
+    run: async ({ number }, ctx) => {
+      const bad = await requireGroupAdmin(ctx); if (bad) return { error: bad };
+      const jid = await resolveParticipant(ctx, number); if (!jid) return { error: 'who? give me their number' };
+      try { await ctx.sock.groupParticipantsUpdate(ctx.chatId, [jid], 'remove'); return { ok: true, summary: `removed ${jidNum(jid)}` }; }
+      catch (e) { return { error: `couldn't remove them (they may be an admin): ${e.message}` }; }
+    },
+  },
+  {
+    name: 'group_promote',
+    description: 'Make a member a group admin, by phone number.',
+    parameters: S({ number: str('member phone number') }, ['number']),
+    run: async ({ number }, ctx) => {
+      const bad = await requireGroupAdmin(ctx); if (bad) return { error: bad };
+      const jid = await resolveParticipant(ctx, number); if (!jid) return { error: 'give me their number' };
+      try { await ctx.sock.groupParticipantsUpdate(ctx.chatId, [jid], 'promote'); return { ok: true, summary: `promoted ${jidNum(jid)} to admin` }; }
+      catch (e) { return { error: `couldn't promote: ${e.message}` }; }
+    },
+  },
+  {
+    name: 'group_demote',
+    description: 'Remove admin from a member, by phone number.',
+    parameters: S({ number: str('member phone number') }, ['number']),
+    run: async ({ number }, ctx) => {
+      const bad = await requireGroupAdmin(ctx); if (bad) return { error: bad };
+      const jid = await resolveParticipant(ctx, number); if (!jid) return { error: 'give me their number' };
+      try { await ctx.sock.groupParticipantsUpdate(ctx.chatId, [jid], 'demote'); return { ok: true, summary: `demoted ${jidNum(jid)}` }; }
+      catch (e) { return { error: `couldn't demote: ${e.message}` }; }
+    },
+  },
+  {
+    name: 'group_setting',
+    description: "Change who can post or edit this group. action: lock_chat (only admins can send messages), unlock_chat (everyone can), lock_info (only admins edit group name/icon/description), unlock_info (everyone can).",
+    parameters: S({ action: { type: 'string', enum: ['lock_chat', 'unlock_chat', 'lock_info', 'unlock_info'] } }, ['action']),
+    run: async ({ action }, ctx) => {
+      const bad = await requireGroupAdmin(ctx); if (bad) return { error: bad };
+      const map = { lock_chat: 'announcement', unlock_chat: 'not_announcement', lock_info: 'locked', unlock_info: 'unlocked' };
+      const s = map[action]; if (!s) return { error: 'action must be lock_chat/unlock_chat/lock_info/unlock_info' };
+      try { await ctx.sock.groupSettingUpdate(ctx.chatId, s); return { ok: true, summary: `group setting: ${action}` }; }
+      catch (e) { return { error: `couldn't change that setting: ${e.message}` }; }
+    },
+  },
+  {
+    name: 'group_update_info',
+    description: "Rename this group and/or change its description. Pass subject, description, or both.",
+    parameters: S({ subject: str('new group name (optional)'), description: str('new group description (optional)') }, []),
+    run: async ({ subject, description }, ctx) => {
+      const bad = await requireGroupAdmin(ctx); if (bad) return { error: bad };
+      const done = [];
+      try {
+        if (subject?.trim()) { await ctx.sock.groupUpdateSubject(ctx.chatId, subject.trim()); done.push(`name → ${subject.trim()}`); }
+        if (description?.trim()) { await ctx.sock.groupUpdateDescription(ctx.chatId, description.trim()); done.push('description updated'); }
+      } catch (e) { return { error: `failed: ${e.message}` }; }
+      return done.length ? { ok: true, summary: done.join('; ') } : { error: 'give me a new subject and/or description' };
+    },
+  },
   // placeholder-tools-marker
 ];
 
@@ -338,7 +440,7 @@ const DEFAULT_PERSONA =
   'Talk like a real person, not a corporate FAQ: concise, warm, a bit of banter is fine, and you can match the owner\'s casual/Nigerian tone when they use it. ' +
   'Be proactive and decisive — if you can just do the thing, do it; never pad replies or over-explain.';
 
-function buildSystemPrompt() {
+function buildSystemPrompt(ctx = {}) {
   const now = wat();
   const owner = process.env.OWNER_NAME || 'the owner';
   const persona = process.env.NEXUS_PERSONA?.trim() || DEFAULT_PERSONA;
@@ -365,7 +467,8 @@ function buildSystemPrompt() {
     persona,
     `Current date & time: ${now.format('dddd, DD MMM YYYY HH:mm')} (WAT, UTC+1). Every time you set is WAT.`,
     `You get things done by calling tools — don't just describe, DO. These are the ONLY things you can access:\n${toolList}`,
-    'You CANNOT delete data, message other people, send to other chats, moderate groups, or control the PC/system. If asked to, say so plainly and point to the explicit bot commands. If the owner asks what you can do, summarise the list above honestly in a line or two — don\'t invent abilities.',
+    `Group admin: you CAN kick, promote/demote, tag everyone, lock/unlock the chat, and rename or re-describe a group — but ONLY inside a group where I'm an admin${ctx.isGroup ? ' (this chat IS a group)' : " (this chat is NOT a group, so group tools won't work here)"}. For anything that affects other people (kick, demote, lock, rename), act only on a clear instruction; if you're unsure who or what, ask ONE short question first.`,
+    'You CANNOT message other chats on your own, read other people\'s private data, or control the PC/system. If asked, say so plainly. If the owner asks what you can do, summarise the list above honestly — don\'t invent abilities.',
     'When the owner shares a lasting fact or preference about themselves, call remember_fact. If a request is missing a key detail (time, course, amount…), ask ONE short question instead of guessing. After acting, confirm what you did in a short line. Keep replies short, plain-text, no markdown headers.',
     memBlock,
   ].join('\n\n');
@@ -391,18 +494,19 @@ function loadHistory() {
   return out;
 }
 
-// Shared tool executor — runs a tool by name, records a summary action.
-async function callTool(name, args, actions) {
+// Shared tool executor — runs a tool by name, records a summary action. `ctx`
+// ({ sock, chatId, isGroup }) is forwarded so group_* tools can act on this chat.
+async function callTool(name, args, actions, ctx) {
   const tool = TOOLS.find(t => t.name === name);
   let result;
-  try { result = tool ? await tool.run(args || {}) : { error: `unknown tool ${name}` }; }
+  try { result = tool ? await tool.run(args || {}, ctx) : { error: `unknown tool ${name}` }; }
   catch (e) { result = { error: `tool error: ${e.message}` }; }
   if (result?.ok && result.summary) actions.push(result.summary);
   return result;
 }
 
 // AgentRouter (OpenAI-style `tools`) agent loop.
-async function runAgentRouterAgent(system, history, userText) {
+async function runAgentRouterAgent(system, history, userText, ctx) {
   const messages = [{ role: 'system', content: system }, ...history, { role: 'user', content: userText }];
   const actions = [];
   let final = '';
@@ -412,7 +516,7 @@ async function runAgentRouterAgent(system, history, userText) {
     if (msg.tool_calls?.length) {
       for (const call of msg.tool_calls) {
         const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
-        const result = await callTool(call.function?.name, args, actions);
+        const result = await callTool(call.function?.name, args, actions, ctx);
         messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result).slice(0, 2000) });
       }
       continue;
@@ -450,7 +554,7 @@ const GEMINI_TOOL_DECLS = [{
 }];
 
 // Gemini native function-calling agent loop.
-async function runGeminiAgent(system, history, userText) {
+async function runGeminiAgent(system, history, userText, ctx) {
   const contents = [
     ...history.map(h => ({ role: h.role === 'assistant' ? 'model' : 'user', parts: [{ text: h.content }] })),
     { role: 'user', parts: [{ text: userText }] },
@@ -464,7 +568,7 @@ async function runGeminiAgent(system, history, userText) {
     if (calls.length) {
       const parts = [];
       for (const call of calls) {
-        const result = await callTool(call.name, call.args, actions);
+        const result = await callTool(call.name, call.args, actions, ctx);
         parts.push({ functionResponse: { name: call.name, response: (result && typeof result === 'object') ? result : { result } } });
       }
       // Gemini 3 dropped the old `function` role — tool results go back as
@@ -484,24 +588,26 @@ async function runGeminiAgent(system, history, userText) {
  * One NEXUS turn. Gemini (native function-calling) first, AgentRouter as backup.
  * Persists the exchange and returns { text, actions }.
  */
-export async function askNexus(userText) {
+export async function askNexus(userText, ctx = {}) {
   if (!nexusReady()) {
-    throw new Error('🧠 NEXUS needs a GEMINI_API_KEY (or AGENTROUTER_API_KEY) in config.env.');
+    throw new Error('⚡ NEXUS needs a GEMINI_API_KEY (or AGENTROUTER_API_KEY) in config.env.');
   }
-  const system = buildSystemPrompt();
+  const system = buildSystemPrompt(ctx);
   const history = loadHistory();
   addNexusTurn('user', userText);
 
   let result = null;
   if (geminiReady()) {
-    try { result = await runGeminiAgent(system, history, userText); }
+    try { result = await runGeminiAgent(system, history, userText, ctx); }
     catch (e) { console.error('[RF] NEXUS Gemini failed → AgentRouter:', e.message); }
   }
   if (!result && agentRouterReady()) {
-    try { result = await runAgentRouterAgent(system, history, userText); }
+    try { result = await runAgentRouterAgent(system, history, userText, ctx); }
     catch (e) { console.error('[RF] NEXUS AgentRouter failed:', e.message); }
   }
-  if (!result) result = { text: '🧠 All AI providers failed just now — check your keys/model and try again.', actions: [] };
+  // No leading emoji — the command layer prepends the NEXUS marker, so adding one
+  // here would double it ("⚡ ⚡ All providers failed").
+  if (!result) result = { text: 'All AI providers failed just now — check your keys/model and try again.', actions: [] };
 
   addNexusTurn('assistant', result.text);
   trimNexusHistory(200);

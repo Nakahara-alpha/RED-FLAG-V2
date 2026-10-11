@@ -160,9 +160,16 @@ async function geminiGenerate(parts, { model = GEMINI_MODEL } = {}) {
   return text;
 }
 
-// Multi-key, thinking-minimised request. Returns the model's `content` object
-// ({ role, parts }). Rotates keys on failure; on a thinking rejection retries
-// the same key once WITHOUT the field. Shared by every Gemini call below.
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// 5xx = Google overloaded → retry the SAME key briefly. 429 (rate limit/quota) is
+// deliberately NOT here: on a rate-limit we rotate straight to the next key rather
+// than hammering the exhausted one — that's what spreads load across your keys.
+const GEMINI_TRANSIENT = new Set([500, 502, 503, 504]);
+
+// Multi-key, thinking-minimised request returning the model's `content` object.
+// Per key: retry 5xx overloads a couple times; drop thinkingConfig if a model
+// rejects it; on 429/other, rotate to the next key. Advances _gemIdx so load
+// spreads evenly even within a single NEXUS turn's multiple calls.
 async function geminiRequest(base, { model = GEMINI_MODEL, timeoutMs = AI_TIMEOUT_MS } = {}) {
   const keys = geminiKeys();
   if (!keys.length) throw new AiUnavailableError('no gemini key');
@@ -173,7 +180,8 @@ async function geminiRequest(base, { model = GEMINI_MODEL, timeoutMs = AI_TIMEOU
   let lastErr;
   for (let n = 0; n < keys.length; n++) {
     const key = keys[(_gemIdx + n) % keys.length];
-    for (let v = 0; v < variants.length; v++) {
+    let v = 0, tries = 0;
+    while (v < variants.length) {
       try {
         const j = await geminiFetch(model, key, variants[v], timeoutMs);
         const content = j.candidates?.[0]?.content;
@@ -182,10 +190,12 @@ async function geminiRequest(base, { model = GEMINI_MODEL, timeoutMs = AI_TIMEOU
         return content;
       } catch (e) {
         lastErr = e;
-        const thinkingRejected = v === 0 && variants.length > 1 && e.status === 400 &&
-          /think|generationConfig|Unknown name|Invalid JSON/i.test(e.body || e.message || '');
-        if (thinkingRejected) continue;   // same key, no thinkingConfig
-        break;                            // other error → next key
+        if (v === 0 && variants.length > 1 && e.status === 400 &&
+            /think|generationConfig|Unknown name|Invalid JSON/i.test(e.body || e.message || '')) {
+          v = 1; tries = 0; continue;                      // same key, drop thinkingConfig
+        }
+        if (GEMINI_TRANSIENT.has(e.status) && tries++ < 2) { await sleep(500 * tries); continue; }
+        break;                                             // 429 / other → next key
       }
     }
   }

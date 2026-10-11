@@ -10,29 +10,29 @@ async function handleNexus(sock, msg, args) {
 
   if (sub === 'reset') {
     clearNexusHistory();
-    return reply(sock, msg, '🧠 NEXUS conversation reset — starting fresh (saved facts kept).');
+    return reply(sock, msg, '⚡ NEXUS conversation reset — starting fresh (saved facts kept).');
   }
   if (sub === 'memory' || sub === 'mem') {
     const mems = listNexusMemory();
     return reply(sock, msg, mems.length
-      ? `🧠 *NEXUS remembers:*\n${mems.map(m => `*#${m.id}* ${m.fact}`).join('\n')}\n\nForget: *${PREFIX()}nexus forget <id|all>*`
-      : '🧠 NEXUS has no saved facts yet. Tell me things like "remember I\'m a 300-level CS student".');
+      ? `⚡ *NEXUS remembers:*\n${mems.map(m => `*#${m.id}* ${m.fact}`).join('\n')}\n\nForget: *${PREFIX()}nexus forget <id|all>*`
+      : '⚡ NEXUS has no saved facts yet. Tell me things like "remember I\'m a 300-level CS student".');
   }
   if (sub === 'forget') {
     if ((args[1] || '').toLowerCase() === 'all') {
       const n = clearNexusMemory();
-      return reply(sock, msg, `🧠 Cleared ${n} memor${n === 1 ? 'y' : 'ies'}.`);
+      return reply(sock, msg, `⚡ Cleared ${n} memor${n === 1 ? 'y' : 'ies'}.`);
     }
     const id = parseInt(args[1], 10);
     if (!id) return reply(sock, msg, `Usage: *${PREFIX()}nexus forget <id|all>* (see *${PREFIX()}nexus memory*)`);
     const n = deleteNexusMemory(id);
-    return reply(sock, msg, n ? `🧠 Forgot #${id}.` : `⚠️ No memory #${id}.`);
+    return reply(sock, msg, n ? `⚡ Forgot #${id}.` : `⚠️ No memory #${id}.`);
   }
 
   const text = args.join(' ').trim();
   if (!text) {
     return reply(sock, msg,
-      `🧠 *NEXUS* — your assistant brain. Just talk to me (no prefix needed):\n` +
+      `⚡ *NEXUS* — your assistant brain. Just talk to me (no prefix needed):\n` +
       `• *nexus remind me to call mum at 6pm*\n` +
       `• *nexus add CSC201 exam 2026-07-20 9am*\n` +
       `• *nexus I spent 1500 on lunch*\n` +
@@ -40,16 +40,17 @@ async function handleNexus(sock, msg, args) {
       `*${PREFIX()}nexus memory* · *${PREFIX()}nexus forget <id>* · *${PREFIX()}nexus reset*`);
   }
   if (!nexusReady()) {
-    return reply(sock, msg, '🧠 NEXUS needs *AGENTROUTER_API_KEY* in config.env (key from agentrouter.org/console/token), then restart.');
+    return reply(sock, msg, '⚡ NEXUS needs a *GEMINI_API_KEY* in config.env (free at aistudio.google.com — several comma-separated keys spread the rate limit), then restart.');
   }
   try {
-    const { text: answer } = await askNexus(text);
-    return reply(sock, msg, `🧠 ${answer}`);
+    const chatId = msg.key.remoteJid;
+    const { text: answer } = await askNexus(text, { sock, chatId, isGroup: chatId.endsWith('@g.us') });
+    return reply(sock, msg, `⚡ ${answer}`);
   } catch (err) {
     console.error('[RF] nexus failed:', err);
-    return reply(sock, msg, err.message?.startsWith('🧠')
+    return reply(sock, msg, err.message?.startsWith('⚡')
       ? err.message
-      : '🧠 NEXUS hit an error — try again, or check the AgentRouter key/model with *' + PREFIX() + 'aimodel*.');
+      : '⚡ NEXUS hit an error — try again, or check the AgentRouter key/model with *' + PREFIX() + 'aimodel*.');
   }
 }
 
