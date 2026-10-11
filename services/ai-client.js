@@ -6,7 +6,7 @@ import { GLOBAL, getConfig } from '../db/queries.js';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
 const GROQ_VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
 const GROQ_WHISPER_MODEL = 'whisper-large-v3-turbo';
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 
 // AgentRouter (agentrouter.org) — OpenAI-compatible: POST <base>/chat/completions
 // with a Bearer key. Base/model overridable so you can point at any model the
