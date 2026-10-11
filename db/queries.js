@@ -26,6 +26,9 @@ export function getDb() {
     'ALTER TABLE tracked_anime ADD COLUMN mal_id INTEGER',
     'ALTER TABLE tracked_anime ADD COLUMN broadcast TEXT',
     'ALTER TABLE tracked_anime ADD COLUMN next_air_at INTEGER',
+    // group activity: record when we FIRST saw each member so NEXUS can honestly
+    // say "no activity since <date>" instead of "never messaged".
+    'ALTER TABLE msg_stats ADD COLUMN first_ts INTEGER',
   ];
   for (const m of migrations) {
     try { _db.exec(m); } catch { /* already applied */ }
@@ -338,12 +341,25 @@ export function bumpStat(chatId, userId, hour) {
   let hours = {};
   if (row) { try { hours = JSON.parse(row.hours); } catch { hours = {}; } }
   hours[hour] = (hours[hour] || 0) + 1;
-  db.prepare(`INSERT INTO msg_stats (chat_id,user_id,count,hours,last_ts) VALUES (?,?,1,?,?)
+  const now = Date.now();
+  // first_ts is set only on INSERT (left untouched on conflict) so it marks when
+  // this member was first seen — i.e. where our data for them begins.
+  db.prepare(`INSERT INTO msg_stats (chat_id,user_id,count,hours,last_ts,first_ts) VALUES (?,?,1,?,?,?)
     ON CONFLICT(chat_id,user_id) DO UPDATE SET count=count+1, hours=excluded.hours, last_ts=excluded.last_ts`)
-    .run(chatId, userId, JSON.stringify(hours), Date.now());
+    .run(chatId, userId, JSON.stringify(hours), now, now);
 }
 export function topStats(chatId, n = 10) {
   return getDb().prepare('SELECT * FROM msg_stats WHERE chat_id=? ORDER BY count DESC LIMIT ?').all(chatId, n);
+}
+// Members active since a cutoff (ms epoch; 0 = all time), most recent first.
+export function activeSince(chatId, sinceTs = 0) {
+  return getDb().prepare('SELECT user_id, count, last_ts FROM msg_stats WHERE chat_id=? AND last_ts>=? ORDER BY last_ts DESC').all(chatId, sinceTs);
+}
+// Earliest point we have data for in this chat (min first_ts); null if unknown
+// (e.g. rows recorded before the first_ts column existed).
+export function statsTrackingSince(chatId) {
+  const r = getDb().prepare('SELECT MIN(first_ts) AS since FROM msg_stats WHERE chat_id=?').get(chatId);
+  return r?.since || null;
 }
 export function chatHourHistogram(chatId) {
   const rows = getDb().prepare('SELECT hours FROM msg_stats WHERE chat_id=?').all(chatId);

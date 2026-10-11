@@ -18,7 +18,7 @@ import {
   addReminder, addDeadline, addTimetable, addNote, addIdea, addTodo, addExpense,
   addBirthday, addReadLater, addTrackedAnime, addRecurring, addHabit,
   listDeadlines, listTodos, timetableForDay, listReminders, expensesSince,
-  listTrackedAnime,
+  listTrackedAnime, activeSince, statsTrackingSince,
   addNexusTurn, recentNexusTurns, trimNexusHistory,
   addNexusMemory, listNexusMemory,
 } from '../db/queries.js';
@@ -424,6 +424,28 @@ const TOOLS = [
         if (description?.trim()) { await ctx.sock.groupUpdateDescription(ctx.chatId, description.trim()); done.push('description updated'); }
       } catch (e) { return { error: `failed: ${e.message}` }; }
       return done.length ? { ok: true, summary: done.join('; ') } : { error: 'give me a new subject and/or description' };
+    },
+  },
+  {
+    name: 'get_group_activity',
+    description: "Who's been active in THIS group. Pass days to look back (e.g. 7 = last week); omit for all time. CRITICAL: your data only starts at tracking_since — if a member isn't listed, say they've had 'no activity since <tracking_since>', NEVER that they 'never messaged'. You cannot see messages from before you started counting.",
+    parameters: S({ days: { type: 'number', description: 'look-back window in days; omit for all time' } }, []),
+    run: async ({ days }, ctx) => {
+      if (!ctx?.isGroup) return { error: 'that only works inside a group' };
+      const d = Number(days);
+      const since = (Number.isFinite(d) && d > 0) ? Date.now() - d * 86400000 : 0;
+      const rows = activeSince(ctx.chatId, since);
+      const trackingSince = statsTrackingSince(ctx.chatId);
+      return {
+        ok: true,
+        data: {
+          tracking_since: trackingSince ? fmtDT(trackingSince) : 'when I started counting in this group',
+          window: since ? `last ${d} day(s)` : 'all time',
+          active_count: rows.length,
+          members: rows.slice(0, 40).map(r => ({ number: r.user_id, messages: r.count, last_seen: fmtDT(r.last_ts) })),
+          note: 'Absence from this list means no activity since tracking_since, NOT that they never messaged.',
+        },
+      };
     },
   },
   // placeholder-tools-marker

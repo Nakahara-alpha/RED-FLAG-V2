@@ -3,7 +3,7 @@
 // through AgentRouter, and remembers context across messages. Owner-only.
 import { askNexus, nexusReady } from '../services/nexus.js';
 import { clearNexusHistory, listNexusMemory, deleteNexusMemory, clearNexusMemory } from '../db/queries.js';
-import { reply, PREFIX } from '../lib/helpers.js';
+import { reply, PREFIX, getText } from '../lib/helpers.js';
 
 async function handleNexus(sock, msg, args) {
   const sub = (args[0] || '').toLowerCase();
@@ -44,7 +44,14 @@ async function handleNexus(sock, msg, args) {
   }
   try {
     const chatId = msg.key.remoteJid;
-    const { text: answer } = await askNexus(text, { sock, chatId, isGroup: chatId.endsWith('@g.us') });
+    // If the owner is REPLYING to a message, feed that message to NEXUS as context
+    // so "nexus translate" / "nexus what does this mean" works on the quoted text.
+    const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+    const quotedText = quoted ? (getText(quoted) || '').trim() : '';
+    const prompt = quotedText
+      ? `[The owner is replying to this message:\n"""\n${quotedText.slice(0, 2000)}\n"""]\n\n${text}`
+      : text;
+    const { text: answer } = await askNexus(prompt, { sock, chatId, isGroup: chatId.endsWith('@g.us') });
     return reply(sock, msg, `⚡ ${answer}`);
   } catch (err) {
     console.error('[RF] nexus failed:', err);
